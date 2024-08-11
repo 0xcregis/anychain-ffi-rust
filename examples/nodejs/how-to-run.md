@@ -14,7 +14,7 @@ npm install -g node-gyp
    JavaScript. It can be used to create bindings to native libraries without writing any C++ code.
 
 ```bash
-git clone git://github.com/node-ffi-napi/node-ffi-napi.git ffi-napi
+git clone https://github.com/node-ffi-napi/node-ffi-napi.git ffi-napi
 ```
 
 3. Navigate to the `ffi-napi` directory.

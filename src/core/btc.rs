@@ -5,7 +5,7 @@ use anychain_bitcoin::{
     BitcoinTransactionParameters, SignatureHash,
 };
 use anychain_core::Transaction;
-use anychain_kms::bip32::{DerivationPath, XPub};
+use anychain_kms::bip32::{DerivationPath, XpubSecp256k1};
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -135,7 +135,7 @@ pub fn raw_transaction_signing_hashes<N: BitcoinNetwork>(
 
     for i in 0..input_count {
         let (path, format, balance) = infos[i as usize].clone();
-        let xpub = XPub::from_str(&xpub)?;
+        let xpub = XpubSecp256k1::from_str(&xpub)?;
         let path = DerivationPath::from_str(path)?;
         let xpub = xpub.derive_from_path(&path)?;
         let public_key = *xpub.public_key();
@@ -197,7 +197,7 @@ pub fn insert_signatures<N: BitcoinNetwork>(
 
     for i in 0..input_count {
         let (path, format, _) = infos[i].clone();
-        let xpub = XPub::from_str(&xpub)?;
+        let xpub = XpubSecp256k1::from_str(&xpub)?;
         let path = DerivationPath::from_str(path).unwrap();
         let xpub = xpub.derive_from_path(&path).unwrap();
         let public_key = *xpub.public_key();

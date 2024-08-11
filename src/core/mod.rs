@@ -7,7 +7,7 @@ use {
     anychain_kms::{
         bip32::{
             ChildNumber, DerivationPath, ExtendedKey, ExtendedKeyAttrs, HmacSha512, Prefix,
-            Prefix as XPrefix, XPrv, XPub,
+            Prefix as XPrefix, XprvSecp256k1, XpubSecp256k1,
         },
         bip39::{Language, Mnemonic, MnemonicType, Seed},
         crypto::ripemd,
@@ -49,7 +49,7 @@ pub fn parse_mnemonic(phrase: String) -> Result<Value> {
         let mnemonic = Mnemonic::from_phrase(phrase.as_str(), language)?;
         seed.extend_from_slice(Seed::new(&mnemonic, "").as_bytes());
         let hash = ripemd(&seed);
-        let xprv = XPrv::new(seed)?;
+        let xprv = XprvSecp256k1::new(seed)?;
         let xpub = xprv.public_key().to_string(Prefix::XPUB);
         let data = json!({
             "xpub": xpub,
@@ -95,13 +95,13 @@ pub fn generate_master_xpub(public_key: String, chain_code: String) -> Result<Va
     };
 
     Ok(Value::String(
-        XPub::try_from(xpub)?.to_string(XPrefix::XPUB),
+        XpubSecp256k1::try_from(xpub)?.to_string(XPrefix::XPUB),
     ))
 }
 
 pub fn create_address(xpub: String, chain_type: u32, index1: u32, index2: u32) -> Result<Value> {
     let path = format!("m/44/{}/0/{}/{}", chain_type, index1, index2);
-    let xpub = XPub::from_str(xpub.as_str())?;
+    let xpub = XpubSecp256k1::from_str(xpub.as_str())?;
     let derive_path = DerivationPath::from_str(path.as_str())?;
     let pubkey = *xpub.derive_from_path(&derive_path)?.public_key();
     let chain_type = ChainType::try_from(chain_type)?;
@@ -371,7 +371,7 @@ fn hmac_digest(data: &str, elapsed_half_hours: u64) -> Result<Vec<u8>> {
         elapsed_half_hours.to_le_bytes().to_vec(), // elapsed half-hours is of type u64, which is 8 bytes
         vec![0; 24],                               // pad 24 zeros to form the key for HmacSha512
     ]
-    .concat();
+        .concat();
 
     let mut hasher = HmacSha512::new_from_slice(&key)?;
     hasher.update(data);
