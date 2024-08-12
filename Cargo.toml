@@ -11,18 +11,28 @@ name = "anychain_ffi_lib"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
-anychain-core = { version = "0.1.6" }
-anychain-kms = { version = "0.1.8" }
-anychain-bitcoin = { version = "0.1.7" }
-anyhow = "1.0"
-thiserror = "1.0"
+ethabi = "18.0.0"
+libsecp256k1 = "0.7.1"
+ethereum-types = "0.13.1"
+digest = "0.10.7"
+hex = "0.4.2"
+rand = "0.8.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-digest = "0.10.7"
-hex = "0.4.3"
-rand = "0.8.5"
-libsecp256k1 = "0.7.1"
+thiserror = "1.0"
+anyhow = "1.0"
+libaes = "0.7.0"
+sha2 = "0.10.8"
+protobuf = "=3.4.0"
+jni = { version = "0.20", optional = true }
 neon = { version = "0.10", optional = true, features = ["napi-6"], default-features = false }
+anychain-core = "0.1.6"
+anychain-kms = "0.1.8"
+anychain-bitcoin = "0.1.7"
+anychain-ethereum = "0.1.16"
+anychain-tron = "0.2.5"
+bs58 = "0.5.1"
+url = "2.3.1"
 
 [features]
 default = ["cbinding"]

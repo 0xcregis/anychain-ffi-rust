@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::{str::FromStr, vec};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct BTCParams {
+struct BTCParams {
     #[serde(default)]
     property_id: u32,
     #[serde(default)]
@@ -35,16 +35,15 @@ struct Output {
 
 fn address_format(format: &str) -> BitcoinFormat {
     match format {
-        "p2pkh" => BitcoinFormat::P2PKH,
-        "p2sh_p2wpkh" => BitcoinFormat::P2SH_P2WPKH,
-        "p2wsh" => BitcoinFormat::P2WSH,
-        "bech32" => BitcoinFormat::Bech32,
-        _ => panic!("unrecognized format"),
+        "" | "1" => BitcoinFormat::P2PKH,
+        "3" => BitcoinFormat::P2SH_P2WPKH,
+        "bc1" => BitcoinFormat::Bech32,
+        _ => panic!("unsupported format"),
     }
 }
 
-pub fn build_raw_transaction<N: BitcoinNetwork>(params: String) -> Result<Value> {
-    let params = serde_json::from_str::<BTCParams>(&params).unwrap();
+fn parse_tx<N: BitcoinNetwork>(tx: String) -> Result<BitcoinTransaction<N>> {
+    let params = serde_json::from_str::<BTCParams>(&tx)?;
 
     let inputs: Result<Vec<BitcoinTransactionInput<N>>> = params
         .inputs
@@ -89,22 +88,17 @@ pub fn build_raw_transaction<N: BitcoinNetwork>(params: String) -> Result<Value>
         outputs.remove(0);
     }
 
-    let parameters = BitcoinTransactionParameters::<N>::new(inputs, outputs)?;
-
-    let tx = BitcoinTransaction::<N>::new(&parameters)?;
-
-    Ok(json!(hex::encode(tx.to_bytes()?)))
+    Ok(BitcoinTransaction::<N>::new(
+        &BitcoinTransactionParameters::<N>::new(inputs, outputs)?,
+    )?)
 }
 
-pub fn raw_transaction_signing_hashes<N: BitcoinNetwork>(
-    tx: String,
-    reserved: String,
-) -> Result<Value> {
+pub fn generate_signing_messages<N: BitcoinNetwork>(tx: String, reserved: String) -> Result<Value> {
     if reserved.is_empty() {
         return Err(anyhow!("Missing reserved"));
     }
 
-    let mut tx = BitcoinTransaction::<N>::from_str(&tx)?;
+    let mut tx = parse_tx::<N>(tx)?;
     let input_count = tx.parameters.inputs.len() as u32;
     let reserved = serde_json::from_str::<Value>(&reserved)?;
 
@@ -134,12 +128,16 @@ pub fn raw_transaction_signing_hashes<N: BitcoinNetwork>(
     let mut txids = json!([]);
 
     for i in 0..input_count {
-        let (path, format, balance) = infos[i as usize].clone();
+        let (path, mut format, balance) = infos[i as usize].clone();
         let xpub = XpubSecp256k1::from_str(&xpub)?;
         let path = DerivationPath::from_str(path)?;
         let xpub = xpub.derive_from_path(&path)?;
         let public_key = *xpub.public_key();
         let public_key = BitcoinPublicKey::<N>::from_secp256k1_public_key(public_key, true);
+
+        if N::NAME == "bitcoin cash" || N::NAME == "bitcoin cash testnet" {
+            format = BitcoinFormat::CashAddr;
+        }
 
         tx.input(i)?.set_public_key(public_key, format.clone())?;
         tx.input(i)?.set_balance(balance)?;
@@ -167,8 +165,8 @@ pub fn insert_signatures<N: BitcoinNetwork>(
     }
 
     let sigs = get_signatures(signatures, false)?;
+    let mut tx = parse_tx::<N>(tx)?;
 
-    let mut tx = BitcoinTransaction::<N>::from_str(&tx)?;
     let input_count = tx.parameters.inputs.len();
     let reserved = serde_json::from_str::<Value>(&reserved)?;
 
@@ -196,13 +194,19 @@ pub fn insert_signatures<N: BitcoinNetwork>(
         .collect();
 
     for i in 0..input_count {
-        let (path, format, _) = infos[i].clone();
+        let (path, mut format, _) = infos[i].clone();
         let xpub = XpubSecp256k1::from_str(&xpub)?;
         let path = DerivationPath::from_str(path).unwrap();
         let xpub = xpub.derive_from_path(&path).unwrap();
         let public_key = *xpub.public_key();
         let public_key = BitcoinPublicKey::<N>::from_secp256k1_public_key(public_key, true);
-        tx.input(i as u32)?.set_format(format)?;
+
+        if N::NAME == "bitcoin cash" || N::NAME == "bitcoin cash testnet" {
+            format = BitcoinFormat::CashAddr;
+        }
+
+        tx.input(i as u32)?
+            .set_public_key(public_key.clone(), format)?;
         tx.input(i as u32)?
             .sign(sigs[i].clone(), public_key.serialize())?;
     }
@@ -212,8 +216,9 @@ pub fn insert_signatures<N: BitcoinNetwork>(
     Ok(json!(hex::encode(tx.to_bytes()?)))
 }
 
-pub fn decode_raw_transaction<N: BitcoinNetwork>(raw_tx: String) -> Result<Value> {
-    let tx = BitcoinTransaction::<N>::from_str(&raw_tx)?;
+pub fn decode_raw_transaction<N: BitcoinNetwork>(tx: String) -> Result<Value> {
+    let tx = BitcoinTransaction::<N>::from_str(&tx)?;
+    let txid = format!("{}", tx.to_transaction_id()?);
 
     let mut inputs = json!([]);
     for input in tx.parameters.inputs {
@@ -242,12 +247,12 @@ pub fn decode_raw_transaction<N: BitcoinNetwork>(raw_tx: String) -> Result<Value
     Ok(json!({
         "inputs": inputs,
         "outputs": outputs,
+        "txid": txid,
     }))
 }
 
-pub fn estimate_bandwidth<N: BitcoinNetwork>(params: String, reserved: String) -> Result<Value> {
-    let tx = build_raw_transaction::<N>(params)?;
-    let mut tx = BitcoinTransaction::<N>::from_str(tx.as_str().unwrap())?;
+pub fn estimate_bandwidth<N: BitcoinNetwork>(tx: String, reserved: String) -> Result<Value> {
+    let mut tx = parse_tx::<N>(tx)?;
 
     let input_count = tx.parameters.inputs.len() as u32;
 
@@ -287,208 +292,155 @@ pub fn estimate_bandwidth<N: BitcoinNetwork>(params: String, reserved: String) -
     Ok(json!(stream.len() as u32))
 }
 
-pub fn tx_params_json() -> String {
-    let params = r#"
-    use case of arg 'params' for 'build_raw_transaction()':
-
-    {
-        "inputs": [
-            {
-                "txid": "56091f6bbb619518dbb5789d1b20de1c96fe2ca9d931df57a1eab12a7ab61c36",
-                "index": 2
-            },
-            {
-                "txid": "36d3815b142fc9a93c1fff1ef7994fe6f3919ccc54a51c891e8418ca95a51020",
-                "index": 1
-            },
-            {
-                "txid": "ba2bcfed866d89c59110901ee513ffaba1ab6c8e3b99ab8d386c0f8fc0f8a38b",
-                "index": 1
-            }
-        ],
-        "outputs": [
-            {
-                "to": "n18cKrzVgjchpipLbFRkJ5b4Y2s1KXapD5",
-                "amount": 5700
-            },
-            {
-                "to": "mkDvXYHwatg6Bbj1RuHnR7rSUenL1tJ2Va",
-                "amount": 10000
-            }
-        ]
-    }
-
-
-    use case of arg 'params' for 'build_raw_transaction()' when it's for omni layer assets:
-
-    {
-        "property_id": 31,
-        "property_amount": 100
-        "inputs": [
-            {
-                "txid": "56091f6bbb619518dbb5789d1b20de1c96fe2ca9d931df57a1eab12a7ab61c36",
-                "index": 2
-            },
-            {
-                "txid": "36d3815b142fc9a93c1fff1ef7994fe6f3919ccc54a51c891e8418ca95a51020",
-                "index": 1
-            },
-            {
-                "txid": "ba2bcfed866d89c59110901ee513ffaba1ab6c8e3b99ab8d386c0f8fc0f8a38b",
-                "index": 1
-            }
-        ],
-        "outputs": [
-            {
-                "to": "n18cKrzVgjchpipLbFRkJ5b4Y2s1KXapD5",
-                "amount": 5700
-            },
-            {
-                "to": "mkDvXYHwatg6Bbj1RuHnR7rSUenL1tJ2Va",
-                "amount": 10000
-            }
-        ]
-    }
-
-
-    use case of arg 'reserved' for 'raw_transaction_signing_hashes()':
-
-    {
-        "master_xpub": "xpub661MyMwAqRbcFRmatjv3Ff2dY5rQHNpuEYZ2CbjQ8Qn13taUMRJ82CyYrHApzgE2HRFV3iWMQkNYqAQmPazy2cdNn16phg3BexnjRFqJ8CP",
-        "infos": ["m/44/1/0/8/10001", "m/44/1/0/8/10002", "m/44/1/0/8/10003"]
-    }
-
-
-    (alt) use case of arg 'reserved' for 'raw_transaction_signing_hashes()':
-
-    {
-        "master_xpub": "xpub661MyMwAqRbcFRmatjv3Ff2dY5rQHNpuEYZ2CbjQ8Qn13taUMRJ82CyYrHApzgE2HRFV3iWMQkNYqAQmPazy2cdNn16phg3BexnjRFqJ8CP",
-        "infos": [
-            {
-                "format": "p2sh_p2wpkh",
-                "balance": 90000000000,
-                "path": "m/44/1/0/8/10001"
-            },
-            {
-                "format": "bech32",
-                "balance": 80000000000,
-                "path": "m/44/1/0/8/10002"
-            },
-            {
-                "format": "p2pkh",
-                "balance": 30000000000,
-                "path": "m/44/1/0/8/10003"
-            }
-        ]
-    }
-
-    use case of arg 'reserved' for 'insert_signature()':
-
-    {
-        "master_xpub": "xpub661MyMwAqRbcFRmatjv3Ff2dY5rQHNpuEYZ2CbjQ8Qn13taUMRJ82CyYrHApzgE2HRFV3iWMQkNYqAQmPazy2cdNn16phg3BexnjRFqJ8CP",
-        "infos": ["m/44/1/0/8/10001", "m/44/1/0/8/10002", "m/44/1/0/8/10003"]
-    }
-
-
-    use case of arg 'reserved' for 'estimate_bandwidth()':
-
-    ["bech32", "p2sh_p2wpkh", "p2pkh"]
-    "#;
-
-    params.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::decode_raw_transaction;
-    use crate::core::{
-        btc::insert_signatures, build_raw_transaction, raw_transaction_signing_hashes,
-    };
+    use crate::core::{create_address, generate_signing_messages};
     use anychain_bitcoin::BitcoinTestnet;
 
     #[test]
-    fn transaction_gen() {
-        let param = r#"{
+    fn test_bitcoin() {
+        let tx = r#"{
             "inputs": [
                 {
-                    "txid": "56091f6bbb619518dbb5789d1b20de1c96fe2ca9d931df57a1eab12a7ab61c36",
-                    "index": 2
+                    "txid": "dd97f755f4f3ddc28a9db93140449032ba45cd76630443053030b6b3e36b51e9",
+                    "index": 0
                 },
                 {
-                    "txid": "36d3815b142fc9a93c1fff1ef7994fe6f3919ccc54a51c891e8418ca95a51020",
-                    "index": 1
-                },
-                {
-                    "txid": "ba2bcfed866d89c59110901ee513ffaba1ab6c8e3b99ab8d386c0f8fc0f8a38b",
+                    "txid": "44f154db13459421f4aae8664b9b731f4f91d998571169ddc97d614fa092ee9b",
                     "index": 1
                 }
             ],
             "outputs": [
                 {
-                    "to": "n18cKrzVgjchpipLbFRkJ5b4Y2s1KXapD5",
-                    "amount": 5700
+                    "to": "tb1q2cy376amvx233ka40zw3kgx7rjt0ut9fz9e4el",
+                    "amount": 19000
                 },
                 {
-                    "to": "mkDvXYHwatg6Bbj1RuHnR7rSUenL1tJ2Va",
-                    "amount": 10000
+                    "to": "tb1q2cy376amvx233ka40zw3kgx7rjt0ut9fmyca74apa2cj574krsmqk8z5c9",
+                    "amount": 19000
                 }
             ]
         }"#;
 
-        let tx = build_raw_transaction(param.to_string(), 1).unwrap();
-
-        println!("tx = {}", tx);
-
         let reserved = r#"{
-            "master_xpub": "xpub661MyMwAqRbcFRmatjv3Ff2dY5rQHNpuEYZ2CbjQ8Qn13taUMRJ82CyYrHApzgE2HRFV3iWMQkNYqAQmPazy2cdNn16phg3BexnjRFqJ8CP",
-            "infos": ["m/44/1/0/8/10001", "m/44/1/0/8/10002", "m/44/1/0/8/10003"]
+            "master_xpub": "xpub661MyMwAqRbcGv3zotXdkWta9HV6Gq3gBAAqeTTi8KDBtQAkSYL6AkKRrw7KfLsg7uaydCDt6xx1cK7pmXCPCaYAYKoTnySpMSu5Z1qNPCG",
+            "infos": [
+                {
+                    "format": "3",
+                    "balance": 19756,
+                    "path": "m/44/1/0/0/2"
+                },
+                {
+                    "format": "bc1",
+                    "balance": 26355,
+                    "path": "m/44/1/0/0/2"
+                }
+            ]
         }"#;
 
-        let hashes = raw_transaction_signing_hashes(
-            1,
-            tx.as_str().unwrap().to_string(),
-            reserved.to_string(),
-        )
-        .unwrap();
+        let _msgs = generate_signing_messages(1, tx.to_string(), reserved.to_string())
+            .unwrap()
+            .to_string();
 
-        println!("hashes = {}", hashes);
+        // let mut conn = init();
+        // send(&mut conn, msgs);
+        //
+        // let sigs = receive(&mut conn);
+
+        // let tx = insert_signatures::<BitcoinTestnet>(
+        //     sigs.to_string(),
+        //     tx.to_string(),
+        //     reserved.to_string(),
+        // )
+        // .unwrap();
+        //
+        // println!("{}", tx);
+    }
+
+    #[test]
+    fn test_bitcoincash() {
+        let tx = r#"{
+            "inputs": [
+                {
+                    "txid": "d193f0088d7b93bcf3f6d34b1ce21d78c485399a3c426665c47cae3ce3e6b04b",
+                    "index": 0
+                }
+            ],
+            "outputs": [
+                {
+                    "to": "tb1q2cy376amvx233ka40zw3kgx7rjt0ut9fmyca74apa2cj574krsmqk8z5c9",
+                    "amount": 1007000
+                }
+            ]
+        }"#;
+
+        let reserved = r#"{
+            "master_xpub": "xpub661MyMwAqRbcGv3zotXdkWta9HV6Gq3gBAAqeTTi8KDBtQAkSYL6AkKRrw7KfLsg7uaydCDt6xx1cK7pmXCPCaYAYKoTnySpMSu5Z1qNPCG",
+            "infos": [
+                {
+                    "format": "",
+                    "balance": 1015000,
+                    "path": "m/44/51/0/0/2"
+                }
+            ]
+        }"#;
+
+        let _msgs = generate_signing_messages(51, tx.to_string(), reserved.to_string())
+            .unwrap()
+            .to_string();
+
+        // let mut conn = init();
+        // send(&mut conn, msgs);
+        //
+        // let sigs = receive(&mut conn);
+        //
+        // let tx = insert_signatures::<BitcoinTestnet>(
+        //     sigs.to_string(),
+        //     tx.to_string(),
+        //     reserved.to_string(),
+        // )
+        // .unwrap();
+        //
+        // println!("{}", tx);
+    }
+
+    #[test]
+    fn test_address_gen() {
+        let xpub = "xpub661MyMwAqRbcGv3zotXdkWta9HV6Gq3gBAAqeTTi8KDBtQAkSYL6AkKRrw7KfLsg7uaydCDt6xx1cK7pmXCPCaYAYKoTnySpMSu5Z1qNPCG";
+        let fmts = [""];
+
+        // to: bchtest:qz9ncj79z033ku0ck2fng032le70rnxdtya9lccsmh
+
+        for fmt in fmts {
+            let addr = create_address(xpub.to_string(), 51, 0, 2, fmt.to_string()).unwrap();
+            assert_eq!(
+                addr,
+                serde_json::Value::String(
+                    "bchtest:qplny8ud32j59jrq8enrdwunpqlhs3sx7ufa8dcdsu".to_string()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn test_address_gen_bitcoin_mainet_0() {
+        let xpub = "xpub661MyMwAqRbcEzQAuTRFpp8Wvo7QDHrQ4MxXMRuRSxUUXnKbUq6GdUmUfp2QY9j8Hu21juYrgQYUfd39GitgR9kKkDykohHYAjDpVVBdGjJ";
+        let fmts = [""];
+
+        for fmt in fmts {
+            let addr = create_address(xpub.to_string(), 0, 0, 1, fmt.to_string()).unwrap();
+            assert_eq!(
+                addr,
+                serde_json::Value::String("1EjwNvzypjwuYuqZFcX3wSfPpPf5sNG9b5".to_string())
+            );
+        }
     }
 
     #[test]
     fn test_decode() {
-        let tx = "0200000003361cb67a2ab1eaa157df31d9a92cfe961cde201b9d78b5db189561bb6b1f09560200000000f2ffffff2010a595ca18841e891ca554cc9c91f3e64f99f71eff1f3ca9c92f145b81d3360100000000f2ffffff8ba3f8c08f0f6c388dab993b8e6caba1abff13e51e901091c5896d86edcf2bba0100000000f2ffffff0244160000000000001976a914d728b204fda0d6ffb3676685a1ffb31c5053241488ac10270000000000001976a91433a01507f56d49c58e8621783d44bea8df684a5088ac00000000";
-        let sigs = r#"[
-            {
-                "r": "1234567890123456789012345678901234567890123456789012345678901234",
-                "s": "1234567890123456789012345678901234567890123456789012345678901234",
-                "recid": 1
-            },
-            {
-                "r": "1234567890123456789012345678901234567890123456789012345678901234",
-                "s": "1234567890123456789012345678901234567890123456789012345678901234",
-                "recid": 1
-            },
-            {
-                "r": "1234567890123456789012345678901234567890123456789012345678901234",
-                "s": "1234567890123456789012345678901234567890123456789012345678901234",
-                "recid": 1
-            }
-        ]"#;
-
-        let reserved = r#"{
-            "master_xpub": "xpub661MyMwAqRbcFRmatjv3Ff2dY5rQHNpuEYZ2CbjQ8Qn13taUMRJ82CyYrHApzgE2HRFV3iWMQkNYqAQmPazy2cdNn16phg3BexnjRFqJ8CP",
-            "infos": ["m/44/1/0/8/10001", "m/44/1/0/8/10002", "m/44/1/0/8/10003"]
-        }"#;
-
-        let tx = insert_signatures::<BitcoinTestnet>(
-            sigs.to_string(),
-            tx.to_string(),
-            reserved.to_string(),
-        )
-        .unwrap();
-        let tx =
-            decode_raw_transaction::<BitcoinTestnet>(tx.as_str().unwrap().to_string()).unwrap();
-
-        println!("{}", tx);
+        let tx = "02000000000102e9516be3b3b630300543046376cd45ba3290444031b99d8ac2ddf3f455f797dd000000001716001403e1ec03ca1af39920e0b367450d3f83e744ae7bf2ffffff9bee92a04f617dc9dd69115798d9914f1f739b4b66e8aaf421944513db54f1440100000000f2ffffff02384a00000000000016001456091f6bbb619518dbb5789d1b20de1c96fe2ca9384a00000000000022002056091f6bbb619518dbb5789d1b20de1c96fe2ca9d931df57a1eab12a7ab61c3602483045022100a5d341330880733212decaa31b2535e7e9e7acfacb06a981f3d25c78089ce9370220088427181319b15204a32d7567ff164324d1ec70fd5f8d90f234d6f9607c4ff00121025524f7862c566e0107afe2475fc3db1b29b8daf74781de725675aeefb732c8220247304402204e140e54869a6912e474e7fb90e4214a93794b9f59a143549043a52f2dc34d98022070a460a8f94441cc5f71651c5ed884291abefef18c8342fa06ae90aec3e664730121025524f7862c566e0107afe2475fc3db1b29b8daf74781de725675aeefb732c82200000000";
+        let tx = decode_raw_transaction::<BitcoinTestnet>(tx.to_string()).unwrap();
+        dbg!("{}", tx);
     }
 }

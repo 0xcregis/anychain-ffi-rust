@@ -40,40 +40,22 @@ fn generate_master_xpub(mut cx: FunctionContext) -> JsResult<JsString> {
     ))))
 }
 
-/**
- * Create an address based on the extended public key
- * argument 0:  parentXpub Parent extended public key
- * argument 1: chain_type Coin type number
- * argument 2: index Derivation index
- */
 fn create_address(mut cx: FunctionContext) -> JsResult<JsString> {
     let xpub_bs58 = parse_string_with_error(&mut cx, 0, "xpub is required")?;
     let chain_type = parse_u32_with_error(&mut cx, 1, "chain_type is required")?;
     let index1 = parse_u32_with_error(&mut cx, 2, "path index1 is required")?;
     let index2 = parse_u32_with_error(&mut cx, 3, "path index2 is required")?;
+    let format = parse_string_with_error(&mut cx, 4, "address format is required")?;
     Ok(cx.string(convert_json(core::create_address(
-        xpub_bs58, chain_type, index1, index2,
+        xpub_bs58, chain_type, index1, index2, format,
     ))))
 }
 
-/**
- * Construct the original transaction based on the currency type
- * arg 0: chain_type, Currency type
- * arg 1: param, Transaction parameters, object type
- */
-fn build_raw_transaction(mut cx: FunctionContext) -> JsResult<JsString> {
-    let param_json = parse_string_with_error(&mut cx, 0, "transaction param is required")?;
-    let chain_type = parse_u32_with_error(&mut cx, 1, "chain type is required")?;
-    Ok(cx.string(convert_json(core::build_raw_transaction(
-        param_json, chain_type,
-    ))))
-}
-
-fn raw_transaction_signing_hashes(mut cx: FunctionContext) -> JsResult<JsString> {
+fn generate_signing_messages(mut cx: FunctionContext) -> JsResult<JsString> {
     let chain_type = parse_u32_with_error(&mut cx, 0, "chain type is required")?;
     let raw_tx_hex = parse_string(&mut cx, 1)?;
     let reserved = parse_string(&mut cx, 2)?;
-    Ok(cx.string(convert_json(core::raw_transaction_signing_hashes(
+    Ok(cx.string(convert_json(core::generate_signing_messages(
         chain_type, raw_tx_hex, reserved,
     ))))
 }
@@ -102,6 +84,24 @@ fn verify_address(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(convert_json(core::verify_address(address, chain_type))))
 }
 
+fn transfer_params_abi(mut cx: FunctionContext) -> JsResult<JsString> {
+    let address = parse_string_with_error(&mut cx, 0, "address is required")?;
+    let amount = parse_string_with_error(&mut cx, 1, "amount is required")?;
+    let chain_type = parse_u32(&mut cx, 2)?;
+    Ok(cx.string(convert_json(core::transfer_params_abi(
+        address, amount, chain_type,
+    ))))
+}
+
+fn approve_params_abi(mut cx: FunctionContext) -> JsResult<JsString> {
+    let address = parse_string_with_error(&mut cx, 0, "address is required")?;
+    let amount = parse_string_with_error(&mut cx, 1, "amount is required")?;
+    let chain_type = parse_u32(&mut cx, 2)?;
+    Ok(cx.string(convert_json(core::approve_params_abi(
+        address, amount, chain_type,
+    ))))
+}
+
 fn estimate_bandwidth(mut cx: FunctionContext) -> JsResult<JsString> {
     let params = parse_string_with_error(&mut cx, 0, "params is required")?;
     let chain_type = parse_u32(&mut cx, 1)?;
@@ -109,15 +109,6 @@ fn estimate_bandwidth(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(convert_json(core::estimate_bandwidth(
         params, chain_type, reserved,
     ))))
-}
-
-fn transaction_parameters_use_case(mut cx: FunctionContext) -> JsResult<JsString> {
-    let chain_type = parse_u32(&mut cx, 0)?;
-    Ok(
-        cx.string(convert_json(core::transaction_parameters_use_case(
-            chain_type,
-        ))),
-    )
 }
 
 fn keygen(mut cx: FunctionContext) -> JsResult<JsString> {
@@ -142,29 +133,43 @@ fn hash(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(convert_json(core::hash(&data))))
 }
 
+fn encrypt(mut cx: FunctionContext) -> JsResult<JsString> {
+    let data = parse_string_with_error(&mut cx, 0, "data is required")?;
+    let sk = parse_string_with_error(&mut cx, 1, "secret key is required")?;
+    Ok(cx.string(convert_json(core::encrypt(&data, &sk))))
+}
+
+fn decrypt(mut cx: FunctionContext) -> JsResult<JsString> {
+    let data = parse_string_with_error(&mut cx, 0, "data is required")?;
+    let sk = parse_string_with_error(&mut cx, 1, "secret key is required")?;
+    Ok(cx.string(convert_json(core::decrypt(&data, &sk))))
+}
+
+fn json_digest(mut cx: FunctionContext) -> JsResult<JsString> {
+    let json = parse_string_with_error(&mut cx, 0, "json string is required")?;
+    Ok(cx.string(convert_json(core::json_digest(&json))))
+}
+
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("createMnemonic", create_mnemonic)?;
     cx.export_function("parseMnemonic", parse_mnemonic)?;
     cx.export_function("generateMasterXpub", generate_master_xpub)?;
     cx.export_function("createAddress", create_address)?;
-    cx.export_function("buildRawTransaction", build_raw_transaction)?;
-    cx.export_function(
-        "rawTransactionSigningHashes",
-        raw_transaction_signing_hashes,
-    )?;
+    cx.export_function("generateSigningMessages", generate_signing_messages)?;
     cx.export_function("insertSignatures", insert_signatures)?;
     cx.export_function("decodeRawTransaction", decode_raw_transaction)?;
     cx.export_function("verifyAddress", verify_address)?;
+    cx.export_function("transferParamsAbi", transfer_params_abi)?;
+    cx.export_function("approveParamsAbi", approve_params_abi)?;
     cx.export_function("estimateBandwidth", estimate_bandwidth)?;
-    cx.export_function(
-        "transactionParametersUseCase",
-        transaction_parameters_use_case,
-    )?;
     cx.export_function("keygen", keygen)?;
     cx.export_function("sign", sign)?;
     cx.export_function("verify", verify)?;
     cx.export_function("hash", hash)?;
+    cx.export_function("encrypt", encrypt)?;
+    cx.export_function("decrypt", decrypt)?;
+    cx.export_function("jsonDigest", json_digest)?;
     Ok(())
 }
 

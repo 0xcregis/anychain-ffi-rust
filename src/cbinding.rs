@@ -39,7 +39,7 @@ macro_rules! c_char_to_string {
 }
 
 /**
- * Return failure json message
+ * 返回失败json信息
  */
 fn error(msg: String) -> *mut c_char {
     let resp = json!({
@@ -77,28 +77,26 @@ pub extern "C" fn create_address(
     chain_type: u32,
     index1: u32,
     index2: u32,
+    format: *const c_char,
 ) -> *mut c_char {
     let xpub = c_char_to_string!(xpub);
-    to_json_string(core::create_address(xpub, chain_type, index1, index2))
+    let format = c_char_to_string!(format);
+    to_json_string(core::create_address(
+        xpub, chain_type, index1, index2, format,
+    ))
 }
 
 #[no_mangle]
-pub extern "C" fn build_raw_transaction(param: *const c_char, chain_type: u32) -> *mut c_char {
-    let param = c_char_to_string!(param);
-    to_json_string(core::build_raw_transaction(param, chain_type))
-}
-
-#[no_mangle]
-pub extern "C" fn raw_transaction_signing_hashes(
+pub extern "C" fn generate_signing_messages(
     chain_type: u32,
-    raw_transaction: *const c_char,
+    transaction: *const c_char,
     reserved: *const c_char,
 ) -> *mut c_char {
-    let raw_transaction = c_char_to_string!(raw_transaction);
+    let transaction = c_char_to_string!(transaction);
     let reserved = c_char_to_string!(reserved);
-    to_json_string(core::raw_transaction_signing_hashes(
+    to_json_string(core::generate_signing_messages(
         chain_type,
-        raw_transaction,
+        transaction,
         reserved,
     ))
 }
@@ -107,16 +105,16 @@ pub extern "C" fn raw_transaction_signing_hashes(
 pub extern "C" fn insert_signatures(
     signature: *const c_char,
     chain_type: u32,
-    raw_transaction: *const c_char,
+    transaction: *const c_char,
     reserved: *const c_char,
 ) -> *mut c_char {
     let signature = c_char_to_string!(signature);
-    let raw_transaction = c_char_to_string!(raw_transaction);
+    let transaction = c_char_to_string!(transaction);
     let reserved = c_char_to_string!(reserved);
     to_json_string(core::insert_signatures(
         signature,
         chain_type,
-        raw_transaction,
+        transaction,
         reserved,
     ))
 }
@@ -137,6 +135,28 @@ pub extern "C" fn verify_address(address: *const c_char, chain_type: u32) -> *mu
 }
 
 #[no_mangle]
+pub extern "C" fn transfer_params_abi(
+    address: *const c_char,
+    amount: *const c_char,
+    chain_type: u32,
+) -> *mut c_char {
+    let address = c_char_to_string!(address);
+    let amount = c_char_to_string!(amount);
+    to_json_string(core::transfer_params_abi(address, amount, chain_type))
+}
+
+#[no_mangle]
+pub extern "C" fn approve_params_abi(
+    address: *const c_char,
+    amount: *const c_char,
+    chain_type: u32,
+) -> *mut c_char {
+    let address = c_char_to_string!(address);
+    let amount = c_char_to_string!(amount);
+    to_json_string(core::approve_params_abi(address, amount, chain_type))
+}
+
+#[no_mangle]
 pub extern "C" fn estimate_bandwidth(
     params: *const c_char,
     chain_type: u32,
@@ -145,11 +165,6 @@ pub extern "C" fn estimate_bandwidth(
     let params = c_char_to_string!(params);
     let reserved = c_char_to_string!(reserved);
     to_json_string(core::estimate_bandwidth(params, chain_type, reserved))
-}
-
-#[no_mangle]
-pub extern "C" fn transaction_parameters_use_case(chain_type: u32) -> *mut c_char {
-    to_json_string(core::transaction_parameters_use_case(chain_type))
 }
 
 #[no_mangle]
@@ -180,4 +195,24 @@ pub extern "C" fn cregis_verify(
 pub extern "C" fn cregis_hash(data: *const c_char) -> *mut c_char {
     let data = c_char_to_string!(data);
     to_json_string(core::hash(&data))
+}
+
+#[no_mangle]
+pub extern "C" fn cregis_encrypt(data: *const c_char, secret_key: *const c_char) -> *mut c_char {
+    let data = c_char_to_string!(data);
+    let sk = c_char_to_string!(secret_key);
+    to_json_string(core::encrypt(&data, &sk))
+}
+
+#[no_mangle]
+pub extern "C" fn cregis_decrypt(data: *const c_char, secret_key: *const c_char) -> *mut c_char {
+    let data = c_char_to_string!(data);
+    let sk = c_char_to_string!(secret_key);
+    to_json_string(core::decrypt(&data, &sk))
+}
+
+#[no_mangle]
+pub extern "C" fn cregis_json_digest(json: *const c_char) -> *mut c_char {
+    let json = c_char_to_string!(json);
+    to_json_string(core::json_digest(&json))
 }
