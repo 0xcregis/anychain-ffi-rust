@@ -726,3 +726,13 @@ fn key_and_iv(secret_key: &str) -> Result<([u8; 16], [u8; 16])> {
 
 //     println!("addr: {}", addr);
 // }
+
+#[test]
+fn test_create_addr_eth() {
+    let xpub = "xpub661MyMwAqRbcFRmatjv3Ff2dY5rQHNpuEYZ2CbjQ8Qn13taUMRJ82CyYrHApzgE2HRFV3iWMQkNYqAQmPazy2cdNn16phg3BexnjRFqJ8CP";
+    let addr = create_address(xpub.to_string(), 60, 0, 1, "".to_string()).unwrap();
+    assert_eq!(
+        "0x2ec9f63b7b0f2cdb718905dadd925fc637f4f0f2",
+        addr.as_str().unwrap()
+    );
+}

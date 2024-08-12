@@ -348,6 +348,8 @@ mod tests {
         let sk = "08d586ed207046d6476f92fd4852be3830a9d651fc148d6fa5a6f15b77ba5df0";
         let sk = hex::decode(sk).unwrap();
         let sk = libsecp256k1::SecretKey::parse_slice(&sk).unwrap();
+        let pk = libsecp256k1::PublicKey::from_secret_key(&sk);
+        dbg!(pk.serialize().to_vec());
 
         let (sig, recid) = libsecp256k1::sign(&msg, &sk);
         let sig = sig.serialize().to_vec();
@@ -360,7 +362,6 @@ mod tests {
             "recid": recid,
         }])
         .to_string();
-
         let tx = insert_signatures(sigs, 6002, tx, "".to_string()).unwrap();
 
         let tx = decode_raw_transaction(tx.as_str().unwrap().to_string(), 6002).unwrap();
