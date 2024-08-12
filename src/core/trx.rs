@@ -345,7 +345,7 @@ pub fn trc20_transfer_params_abi(address: &str, amount: &str) -> Result<Value> {
     // Trim the first 4 bytes which is the function selector, and
     // return the rest which is the encoding of the parameters
     Ok(json!(hex::encode(
-        abi::trc20_transfer(address, amount)[4..].to_vec(),
+        &abi::trc20_transfer(address, amount)[4..]
     )))
 }
 
@@ -353,7 +353,7 @@ pub fn trc20_approve_params_abi(address: &str, amount: &str) -> Result<Value> {
     // Trim the first 4 bytes which is the function selector, and
     // return the rest which is the encoding of the parameters
     Ok(json!(hex::encode(
-        abi::trc20_approve(address, amount)[4..].to_vec(),
+        &abi::trc20_approve(address, amount)[4..]
     )))
 }
 
@@ -380,4 +380,30 @@ fn test() {
     let tx = decode_raw_transaction(tx.to_string()).unwrap();
 
     println!("{}", tx);
+}
+
+#[test]
+fn test_generate_signing_messages() {
+    let trx_params = TrxParams {
+        permission_id: 1,
+        operation: TrxOperation::None,
+        contract: "TP31Ua3T6zYAQbcnR2vTbYGd426rouWNoD".to_string(),
+        function: "transfer".to_string(),
+        owner: "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm".to_string(),
+        to: "TG7jQ7eGsns6nmQNfcKNgZKyKBFkx7CvXr".to_string(),
+        amount: "500".to_string(),
+        block_hash: "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b".to_string(),
+        block_number: 43785827,
+        nonce: 2,
+        fee_limit: 1000000,
+        now: 16157900,
+    };
+
+    let serialized = serde_json::to_string(&trx_params).unwrap();
+
+    let messages = generate_signing_messages(serialized).unwrap();
+    assert_eq!(
+        messages,
+        json!(["ebcb724f0b9b27881d2bd714b87a334d093fe4019cb8328dbd04a392a44cc822"])
+    );
 }

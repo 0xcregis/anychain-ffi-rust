@@ -19,8 +19,8 @@ exchange between Rust and mobile platforms.
 - anychain-core: 0.1.6
 - anychain-kms: 0.1.8
 - anychain-bitcoin: 0.1.7
-- anychain-ethereum: 0.1.7
-- anychain-tron: 0.1.7
+- anychain-ethereum: 0.1.16
+- anychain-tron: 0.2.5
 
 ## License
 

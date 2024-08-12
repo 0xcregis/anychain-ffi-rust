@@ -51,3 +51,15 @@ node mnemonic.js
 ```bash
 node btc.js
 ```
+
+8. run eth.js
+
+```bash
+node eth.js
+```
+
+9. run trx.js
+
+```bash
+node trx.js
+```
