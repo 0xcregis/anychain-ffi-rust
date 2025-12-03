@@ -1,163 +1,170 @@
+#![allow(unused_imports)]
 use super::util::get_signatures;
 use anychain_core::transaction::Transaction;
 use anychain_tron::{
     abi,
     protocol::{
         balance_contract::{
-            DelegateResourceContract, FreezeBalanceContract, TransferContract,
-            UnDelegateResourceContract, UnfreezeBalanceV2Contract,
+            CancelAllUnfreezeV2Contract, DelegateResourceContract, FreezeBalanceContract,
+            TransferContract, UnDelegateResourceContract, UnfreezeBalanceV2Contract,
+            WithdrawBalanceContract, WithdrawExpireUnfreezeContract,
         },
         common::ResourceCode::BANDWIDTH,
         smart_contract::TriggerSmartContract,
+        witness_contract::VoteWitnessContract,
         Tron::transaction::contract::ContractType,
     },
-    trx, TronAddress, TronTransaction, TronTransactionParameters,
+    trx::*,
+    TronAddress, TronTransaction, TronTransactionParameters,
 };
 use anyhow::{anyhow, Result};
 use ethabi::{decode, ParamType};
 use protobuf::Message;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::str::FromStr;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-enum TrxOperation {
-    #[serde(rename = "freezeBalance")]
-    FreezeBalanceV2 { amount: String, resource: u8 },
+fn parse_tx(tx: String) -> Result<TronTransaction> {
+    let params = match serde_json::from_str::<Value>(&tx) {
+        Ok(params) => params,
+        Err(_) => return Ok(TronTransaction::from_str(&tx)?),
+    };
 
-    #[serde(rename = "unfreezeBalance")]
-    UnfreezeBalanceV2 { amount: String, resource: u8 },
+    let owner = params["owner"].as_str().unwrap();
+    let now = params["now"].as_i64().unwrap();
+    let fee_limit = params["feeLimit"].as_i64().unwrap();
+    let block_number = params["blockNumber"].as_i64().unwrap();
+    let block_hash = params["blockHash"].as_str().unwrap();
 
-    #[serde(rename = "delegateResource")]
-    DelegateResource {
-        recipient: String,
-        amount: String,
-        resource: u8,
-        lock: bool,
-    },
+    let mut tx = TronTransactionParameters::default();
 
-    #[serde(rename = "undelegateResource")]
-    UndelegateResource {
-        recipient: String,
-        amount: String,
-        resource: u8,
-    },
+    tx.set_fee_limit(fee_limit);
+    tx.set_timestamp(now);
+    tx.set_ref_block(block_number, block_hash);
 
-    #[default]
-    None,
-}
+    if let Value::Object(op) = &params["operation"] {
+        let key = op.keys().next().unwrap().as_str();
+        match key {
+            "freezeBalance" => {
+                // this is a transaction that freezes TRX for resource
+                let val = op.get(key).unwrap();
 
-#[derive(Debug, Serialize, Deserialize)]
-struct TrxParams {
-    #[serde(rename = "permissionId", default)]
-    pub permission_id: i32,
-    #[serde(default)]
-    pub operation: TrxOperation,
-    #[serde(default)]
-    pub contract: String,
-    #[serde(default)]
-    pub function: String,
-    pub owner: String,
-    #[serde(default)]
-    pub to: String,
-    #[serde(default)]
-    pub amount: String,
-    #[serde(rename = "blockHash")]
-    pub block_hash: String,
-    #[serde(rename = "blockNumber")]
-    pub block_number: i64,
-    pub nonce: i32,
-    #[serde(rename = "feeLimit", default = "TrxParams::default_fee_limit")]
-    pub fee_limit: i64,
-    pub now: i64,
-}
+                let amount = val["amount"].as_str().unwrap();
+                let resource = val["resource"].as_u64().unwrap() as u8;
 
-impl TrxParams {
-    pub fn default_fee_limit() -> i64 {
-        10 * 1000000
-    }
-}
+                let contract = build_freeze_balance_v2_contract(owner, amount, resource)?;
 
-pub fn parse_tx(tx: String) -> Result<TronTransaction> {
-    let params: TrxParams = serde_json::from_str(&tx)?;
+                tx.set_contract(contract);
+            }
+            "unfreezeBalance" => {
+                // this is a transaction that unfreezes TRX for resource
+                let val = op.get(key).unwrap();
 
-    let mut tx_params = TronTransactionParameters::default();
-    tx_params.set_fee_limit(params.fee_limit);
-    tx_params.set_timestamp(params.now + (params.nonce as i64));
-    tx_params.set_ref_block(params.block_number, &params.block_hash);
+                let amount = val["amount"].as_str().unwrap();
+                let resource = val["resource"].as_u64().unwrap() as u8;
 
-    if let TrxOperation::FreezeBalanceV2 { amount, resource } = params.operation {
-        // this is a transaction that freezes TRX for resource
-        let mut contract = trx::build_freeze_balance_v2_contract(&params.owner, &amount, resource)?;
-        contract.Permission_id = params.permission_id;
-        tx_params.set_contract(contract);
-    } else if let TrxOperation::UnfreezeBalanceV2 { amount, resource } = params.operation {
-        // this is a transaction that unfreezes TRX for resource
-        let mut contract =
-            trx::build_unfreeze_balance_v2_contract(&params.owner, &amount, resource)?;
-        contract.Permission_id = params.permission_id;
-        tx_params.set_contract(contract);
-    } else if let TrxOperation::DelegateResource {
-        recipient,
-        amount,
-        resource,
-        lock,
-    } = params.operation
-    {
-        // this is a transaction that delegates resource
-        let mut contract = trx::build_delegate_resource_contract(
-            &params.owner,
-            &recipient,
-            resource,
-            &amount,
-            lock,
-        )?;
-        contract.Permission_id = params.permission_id;
-        tx_params.set_contract(contract);
-    } else if let TrxOperation::UndelegateResource {
-        recipient,
-        amount,
-        resource,
-    } = params.operation
-    {
-        // this is a transaction that undelegates resource
-        let mut contract =
-            trx::build_undelegate_resource_contract(&params.owner, &recipient, resource, &amount)?;
-        contract.Permission_id = params.permission_id;
-        tx_params.set_contract(contract);
-    } else if !params.contract.is_empty() {
-        // 'contract' is not empty, indicating this is a transaction that calls contract function
-        if params.function.eq("approve") {
-            // 'function' is "approve", indicationg this is a transaction that calls TRC20 approve()
-            let mut contract = trx::build_trc20_approve_contract(
-                &params.owner,
-                &params.contract,
-                &params.to,
-                &params.amount,
-            )?;
-            contract.Permission_id = params.permission_id;
-            tx_params.set_contract(contract);
+                let contract = build_unfreeze_balance_v2_contract(owner, amount, resource)?;
+
+                tx.set_contract(contract);
+            }
+            "delegateResource" => {
+                // this is a transaction that delegates resource
+                let val = op.get(key).unwrap();
+
+                let recipient = val["recipient"].as_str().unwrap();
+                let amount = val["amount"].as_str().unwrap();
+                let resource = val["resource"].as_u64().unwrap() as u8;
+                let lock = val["lock"].as_bool().unwrap();
+
+                let contract =
+                    build_delegate_resource_contract(owner, recipient, resource, amount, lock)?;
+
+                tx.set_contract(contract);
+            }
+            "undelegateResource" => {
+                // this is a transaction that delegates resource
+                let val = op.get(key).unwrap();
+
+                let recipient = val["recipient"].as_str().unwrap();
+                let amount = val["amount"].as_str().unwrap();
+                let resource = val["resource"].as_u64().unwrap() as u8;
+
+                let contract =
+                    build_undelegate_resource_contract(owner, recipient, resource, amount)?;
+
+                tx.set_contract(contract);
+            }
+            "vote" => {
+                // this is a transaction that votes
+                let val = op.get(key).unwrap();
+                let votes = val["votes"].as_array().unwrap();
+                let support = val["support"].as_bool().unwrap();
+
+                let votes = votes
+                    .iter()
+                    .map(|vote| {
+                        let address = vote["vote_address"].as_str().unwrap();
+                        let vote_count =
+                            vote["vote_count"].as_str().unwrap().parse::<i64>().unwrap();
+                        (address, vote_count)
+                    })
+                    .collect::<Vec<(&str, i64)>>();
+
+                let contract = build_vote_witness_contract(owner, votes, support)?;
+
+                tx.set_contract(contract);
+            }
+            _ => return Err(anyhow!("Unsupported operation")),
+        }
+    } else if let Value::String(op) = &params["operation"] {
+        match op.as_str() {
+            "cancelAllUnfreeze" => {
+                // this is a transaction that cancels all unfreeze operations
+                let contract = build_cancel_unfreeze_contract(owner)?;
+                tx.set_contract(contract);
+            }
+            "withdrawUnfreezeBalance" => {
+                // this is a transaction that withdraws unfrozen TRX
+                let contract = build_withdraw_unfreeze_contract(owner)?;
+                tx.set_contract(contract);
+            }
+            "withdrawVoteBalance" => {
+                // this is a transaction that withdraws rewarded TRX for voting
+                let contract = build_withdraw_vote_contract(owner)?;
+                tx.set_contract(contract);
+            }
+            _ => return Err(anyhow!("Unsupported operation")),
+        }
+    } else if params["contract"].is_string() {
+        // this is a transaction that triggers a smart contract
+        let sc = params["contract"].as_str().unwrap();
+        if params["function"].is_string() {
+            let function = params["function"].as_str().unwrap();
+            match function {
+                "approve" => {
+                    // this is a transaction that does the TRC20 approve
+                    let to = params["to"].as_str().unwrap();
+                    let amount = params["amount"].as_str().unwrap();
+                    let contract = build_trc20_approve_contract(owner, sc, to, amount)?;
+                    tx.set_contract(contract);
+                }
+                _ => return Err(anyhow!("Unsupported smart contract function call")),
+            }
         } else {
-            // By default, we regard it a transaction that calls TRC20 transfer()
-            let mut contract = trx::build_trc20_transfer_contract(
-                &params.owner,
-                &params.contract,
-                &params.to,
-                &params.amount,
-            )?;
-            contract.Permission_id = params.permission_id;
-            tx_params.set_contract(contract);
+            // this is a transaction that transfers TRC20 tokens
+            let to = params["to"].as_str().unwrap();
+            let amount = params["amount"].as_str().unwrap();
+            let contract = build_trc20_transfer_contract(owner, sc, to, amount)?;
+            tx.set_contract(contract);
         }
     } else {
         // this is a transaction that transfers TRX
-        let mut contract = trx::build_transfer_contract(&params.owner, &params.to, &params.amount)?;
-        contract.Permission_id = params.permission_id;
-        tx_params.set_contract(contract);
-        // A plain TRX transfer does not consume any fee
-        tx_params.set_fee_limit(0);
+        let to = params["to"].as_str().unwrap();
+        let amount = params["amount"].as_str().unwrap();
+        let contract = build_transfer_contract(owner, to, amount)?;
+        tx.set_contract(contract);
     }
 
-    Ok(TronTransaction::new(&tx_params)?)
+    Ok(TronTransaction::new(&tx)?)
 }
 
 pub fn generate_signing_messages(tx: String) -> Result<Value> {
@@ -191,8 +198,8 @@ pub fn decode_raw_transaction(raw_tx: String) -> Result<Value> {
     let mut ret = match contract_type {
         ContractType::TransferContract => {
             let contract = TransferContract::parse_from_bytes(&stream)?;
-            let from = TronAddress::from_bytes(&contract.owner_address);
-            let to = TronAddress::from_bytes(&contract.to_address);
+            let from = TronAddress::from_bytes(&contract.owner_address)?;
+            let to = TronAddress::from_bytes(&contract.to_address)?;
             let amount = contract.amount as u64;
             json!({
                 "type": "basic",
@@ -203,13 +210,13 @@ pub fn decode_raw_transaction(raw_tx: String) -> Result<Value> {
         }
         ContractType::FreezeBalanceV2Contract => {
             let contract = FreezeBalanceContract::parse_from_bytes(&stream)?;
-            let from = TronAddress::from_bytes(&contract.owner_address);
-            let to = TronAddress::from_bytes(&contract.receiver_address);
+            let from = TronAddress::from_bytes(&contract.owner_address)?;
+            let to = TronAddress::from_bytes(&contract.receiver_address)?;
             let balance = contract.frozen_balance as u64;
             let duration = contract.frozen_duration as u64;
             let resource = contract.resource.unwrap();
             json!({
-                "type": "freezeBalanceV2",
+                "type": "freezeBalance",
                 "from": from.to_string(),
                 "to": to.to_string(),
                 "balance": balance.to_string(),
@@ -219,11 +226,11 @@ pub fn decode_raw_transaction(raw_tx: String) -> Result<Value> {
         }
         ContractType::UnfreezeBalanceV2Contract => {
             let contract = UnfreezeBalanceV2Contract::parse_from_bytes(&stream)?;
-            let from = TronAddress::from_bytes(&contract.owner_address);
+            let from = TronAddress::from_bytes(&contract.owner_address)?;
             let balance = contract.unfreeze_balance as u64;
             let resource = contract.resource.unwrap();
             json!({
-                "type": "unfreezeBalanceV2",
+                "type": "unfreezeBalance",
                 "from": from.to_string(),
                 "balance": balance.to_string(),
                 "resource": if resource == BANDWIDTH { "bandwidth" } else { "energy" },
@@ -231,8 +238,8 @@ pub fn decode_raw_transaction(raw_tx: String) -> Result<Value> {
         }
         ContractType::DelegateResourceContract => {
             let contract = DelegateResourceContract::parse_from_bytes(&stream)?;
-            let from = TronAddress::from_bytes(&contract.owner_address);
-            let to = TronAddress::from_bytes(&contract.receiver_address);
+            let from = TronAddress::from_bytes(&contract.owner_address)?;
+            let to = TronAddress::from_bytes(&contract.receiver_address)?;
             let balance = contract.balance as u64;
             let resource = contract.resource.unwrap();
             let lock = contract.lock;
@@ -249,8 +256,8 @@ pub fn decode_raw_transaction(raw_tx: String) -> Result<Value> {
         }
         ContractType::UnDelegateResourceContract => {
             let contract = UnDelegateResourceContract::parse_from_bytes(&stream)?;
-            let from = TronAddress::from_bytes(&contract.owner_address);
-            let to = TronAddress::from_bytes(&contract.receiver_address);
+            let from = TronAddress::from_bytes(&contract.owner_address)?;
+            let to = TronAddress::from_bytes(&contract.receiver_address)?;
             let balance = contract.balance as u64;
             let resource = contract.resource.unwrap();
             json!({
@@ -261,14 +268,58 @@ pub fn decode_raw_transaction(raw_tx: String) -> Result<Value> {
                 "resource": if resource == BANDWIDTH { "bandwidth" } else { "energy" },
             })
         }
+        ContractType::CancelAllUnfreezeV2Contract => {
+            let contract = CancelAllUnfreezeV2Contract::parse_from_bytes(&stream)?;
+            let owner = TronAddress::from_bytes(&contract.owner_address)?;
+            json!({
+                "type": "cancelAllUnfreeze",
+                "from": owner.to_string(),
+            })
+        }
+        ContractType::WithdrawExpireUnfreezeContract => {
+            let contract = WithdrawExpireUnfreezeContract::parse_from_bytes(&stream)?;
+            let owner = TronAddress::from_bytes(&contract.owner_address)?;
+            json!({
+                "type": "withdrawUnfreezeBalance",
+                "from": owner.to_string(),
+            })
+        }
+        ContractType::VoteWitnessContract => {
+            let contract = VoteWitnessContract::parse_from_bytes(&stream)?;
+            let owner = TronAddress::from_bytes(&contract.owner_address)?;
+            let support = contract.support;
+            let mut votes = json!([]);
+            for vote in contract.votes {
+                let address = TronAddress::from_bytes(&vote.vote_address)?;
+                let vote_count = vote.vote_count as u64;
+                votes.as_array_mut().unwrap().push(json!({
+                    "vote_address": address.to_string(),
+                    "vote_count": vote_count,
+                }));
+            }
+            json!({
+                "type": "vote",
+                "from": owner.to_string(),
+                "support": support,
+                "votes": votes,
+            })
+        }
+        ContractType::WithdrawBalanceContract => {
+            let contract = WithdrawBalanceContract::parse_from_bytes(&stream)?;
+            let owner = TronAddress::from_bytes(&contract.owner_address)?;
+            json!({
+                "type": "withdrawVoteBalance",
+                "from": owner.to_string(),
+            })
+        }
         ContractType::TriggerSmartContract => {
             let contract = TriggerSmartContract::parse_from_bytes(&stream)?;
-            let from = TronAddress::from_bytes(&contract.owner_address);
-            let smart_contract = TronAddress::from_bytes(&contract.contract_address);
+            let from = TronAddress::from_bytes(&contract.owner_address)?;
+            let smart_contract = TronAddress::from_bytes(&contract.contract_address)?;
 
             let params_types = [ParamType::FixedBytes(32), ParamType::Uint(256)];
             let tokens = decode(&params_types, &contract.data[4..])?;
-            let to = TronAddress::from_bytes(&tokens[0].clone().into_fixed_bytes().unwrap()[11..])
+            let to = TronAddress::from_bytes(&tokens[0].clone().into_fixed_bytes().unwrap()[11..])?
                 .clone();
             let amount = tokens[1].clone().into_uint().unwrap();
 
@@ -341,19 +392,21 @@ pub fn decode_raw_transaction(raw_tx: String) -> Result<Value> {
     Ok(ret)
 }
 
+#[allow(clippy::unnecessary_to_owned)]
 pub fn trc20_transfer_params_abi(address: &str, amount: &str) -> Result<Value> {
     // Trim the first 4 bytes which is the function selector, and
     // return the rest which is the encoding of the parameters
     Ok(json!(hex::encode(
-        &abi::trc20_transfer(address, amount)[4..]
+        abi::trc20_transfer(address, amount)[4..].to_vec(),
     )))
 }
 
+#[allow(clippy::unnecessary_to_owned)]
 pub fn trc20_approve_params_abi(address: &str, amount: &str) -> Result<Value> {
     // Trim the first 4 bytes which is the function selector, and
     // return the rest which is the encoding of the parameters
     Ok(json!(hex::encode(
-        &abi::trc20_approve(address, amount)[4..]
+        abi::trc20_approve(address, amount)[4..].to_vec(),
     )))
 }
 
@@ -376,34 +429,193 @@ pub fn estimate_bandwidth(tx: String) -> Result<Value> {
 
 #[test]
 fn test() {
-    let tx = "0ad3010a02d6a92208edd32db513dae85d40d186d8e88e325aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a15414b88a3bdde68b80b09a084f03b16c07ab190da06121541d248267c24ff51ef27c96a7ab8d9d378d08d36782244a9059cbb0000000000000000000000415083fea182cab5aa5082e5db92a5497b17a895230000000000000000000000000000000000000000000000056bc75e2d6310000070f1dec5e88e32900180c2d72f1241e8c226766bf52da7ac749d4ecb45d77b1c21bfceb546927a46cd97290f6ddb5a58ba14732954d78f971f238423837e25792c80ddd4e285b24b70d8cbe82978b101";
-    let tx = decode_raw_transaction(tx.to_string()).unwrap();
+    let transfer = r#"{
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "to": "TG7jQ7eGsns6nmQNfcKNgZKyKBFkx7CvXr",
+        "amount": "1000000",
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
 
-    println!("{}", tx);
-}
+    let trc20_transfer = r#"{
+        "contract": "TP31Ua3T6zYAQbcnR2vTbYGd426rouWNoD",
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "to": "TG7jQ7eGsns6nmQNfcKNgZKyKBFkx7CvXr",
+        "amount": "500000000000",
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
 
-#[test]
-fn test_generate_signing_messages() {
-    let trx_params = TrxParams {
-        permission_id: 1,
-        operation: TrxOperation::None,
-        contract: "TP31Ua3T6zYAQbcnR2vTbYGd426rouWNoD".to_string(),
-        function: "transfer".to_string(),
-        owner: "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm".to_string(),
-        to: "TG7jQ7eGsns6nmQNfcKNgZKyKBFkx7CvXr".to_string(),
-        amount: "500".to_string(),
-        block_hash: "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b".to_string(),
-        block_number: 43785827,
-        nonce: 2,
-        fee_limit: 1000000,
-        now: 16157900,
-    };
+    let trc20_approve = r#"{
+        "contract": "TP31Ua3T6zYAQbcnR2vTbYGd426rouWNoD",
+        "function": "approve",
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "to": "TG7jQ7eGsns6nmQNfcKNgZKyKBFkx7CvXr",
+        "amount": "500000000000",
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
 
-    let serialized = serde_json::to_string(&trx_params).unwrap();
+    let freeze = r#"{
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "operation": {
+            "freezeBalance": {
+                "amount": "500000000000",
+                "resource": 0
+            }
+        },
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
 
-    let messages = generate_signing_messages(serialized).unwrap();
-    assert_eq!(
-        messages,
-        json!(["ebcb724f0b9b27881d2bd714b87a334d093fe4019cb8328dbd04a392a44cc822"])
-    );
+    let unfreeze = r#"{
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "operation": {
+            "unfreezeBalance": {
+                "amount": "500000000000",
+                "resource": 1
+            }
+        },
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
+
+    let delegate = r#"{
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "operation": {
+            "delegateResource": {
+                "recipient": "TG7jQ7eGsns6nmQNfcKNgZKyKBFkx7CvXr",
+                "amount": "500000000000",
+                "resource": 1,
+                "lock": true
+            }
+        },
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
+
+    let undelegate = r#"{
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "operation": {
+            "undelegateResource": {
+                "recipient": "TG7jQ7eGsns6nmQNfcKNgZKyKBFkx7CvXr",
+                "amount": "500000000000",
+                "resource": 1
+            }
+        },
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
+
+    let cancel = r#"{
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "operation": "cancelAllUnfreeze",
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
+
+    let withdraw_unfreeze = r#"{
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "operation": "withdrawUnfreezeBalance",
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
+
+    let vote = r#"{
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "operation": {
+            "vote": {
+                "votes": [
+                    {
+                        "vote_address": "TG7jQ7eGsns6nmQNfcKNgZKyKBFkx7CvXr",
+                        "vote_count": "100000000"
+                    },
+                    {
+                        "vote_address": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+                        "vote_count": "200000000"
+                    },
+                    {
+                        "vote_address": "TP31Ua3T6zYAQbcnR2vTbYGd426rouWNoD",
+                        "vote_count": "300000000"
+                    }
+                ],
+                "support": true
+            }
+        },
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
+
+    let withdraw_vote = r#"{
+        "owner": "TYn6xn1aY3hrsDfLzpyPQtDiKjHEU8Hsxm",
+        "operation": "withdrawVoteBalance",
+        "blockHash": "00000000029c1e638dc7c7c2800e88bb20b8f57adfc4c9f417df8d86c2e8537b",
+        "blockNumber": 43785827,
+        "feeLimit": 1000000,
+        "now": 1719572137182
+    }"#
+    .to_string();
+
+    let msg = generate_signing_messages(transfer).unwrap();
+    println!("{}", msg);
+
+    let msg = generate_signing_messages(trc20_transfer).unwrap();
+    println!("{}", msg);
+
+    let msg = generate_signing_messages(trc20_approve).unwrap();
+    println!("{}", msg);
+
+    let msg = generate_signing_messages(freeze).unwrap();
+    println!("{}", msg);
+
+    let msg = generate_signing_messages(unfreeze).unwrap();
+    println!("{}", msg);
+
+    let msg = generate_signing_messages(delegate).unwrap();
+    println!("{}", msg);
+
+    let msg = generate_signing_messages(undelegate).unwrap();
+    println!("{}", msg);
+
+    let msg = generate_signing_messages(cancel).unwrap();
+    println!("{}", msg);
+
+    let msg = generate_signing_messages(withdraw_unfreeze).unwrap();
+    println!("{}", msg);
+
+    let msg = generate_signing_messages(vote).unwrap();
+    println!("{}", msg);
+
+    let msg = generate_signing_messages(withdraw_vote).unwrap();
+    println!("{}", msg);
 }

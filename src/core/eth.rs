@@ -1,9 +1,10 @@
-use super::util::get_signatures;
+use super::util::{get_signatures, insert, is_1st_round_params};
 use anychain_core::{Transaction, TransactionError};
 use anychain_ethereum::{
-    decode_transfer, encode_transfer, Eip1559Transaction, Eip1559TransactionParameters,
+    decode, erc20_transfer, Eip1559Transaction, Eip1559TransactionParameters,
     Eip1559TransactionSignature, EthereumAddress, EthereumNetwork, EthereumTransaction,
     EthereumTransactionId, EthereumTransactionParameters, EthereumTransactionSignature,
+    TransferWithAuthorizationParameters,
 };
 use anyhow::{anyhow, Result};
 use ethereum_types::U256;
@@ -33,16 +34,52 @@ impl<N: EthereumNetwork> EthTx for Eip1559Transaction<N> {
     }
 }
 
-fn parse_tx<N: EthereumNetwork>(tx: String) -> Result<Box<dyn EthTx>> {
+fn first_round_messages<N: EthereumNetwork>(tx: String) -> Result<Value> {
     let params = serde_json::from_str::<Value>(&tx)?;
 
+    match &params["type"] {
+        Value::String(tx_type) => match tx_type.as_str() {
+            "eip3009_1st_round" => {
+                let token = params["token"].as_str().unwrap().to_string();
+                let token_version = params["tokenVersion"].as_str().unwrap().to_string();
+                let token_contract = params["tokenContract"].as_str().unwrap().to_string();
+                let from = params["from"].as_str().unwrap().to_string();
+                let to = params["to"].as_str().unwrap().to_string();
+                let amount = params["amount"].as_str().unwrap().to_string();
+                let valid_after = params["validAfter"].as_str().unwrap().to_string();
+                let valid_before = params["validBefore"].as_str().unwrap().to_string();
+                let nonce3009 = params["nonce3009"].as_str().unwrap().to_string();
+
+                let params = TransferWithAuthorizationParameters::<N>::new(
+                    token,
+                    token_version,
+                    token_contract.clone(),
+                    from,
+                    to,
+                    amount,
+                    valid_after,
+                    valid_before,
+                    nonce3009,
+                )?;
+
+                let digest = params.digest()?;
+                Ok(json!([hex::encode(digest)]))
+            }
+            _ => Err(anyhow!("invalid transaction type")),
+        },
+        Value::Null => Err(anyhow!("invalid 1st round transaction type")),
+        _ => Err(anyhow!("invalid 1st round transaction type")),
+    }
+}
+
+fn parse_tx_old<N: EthereumNetwork>(params: &Value) -> Result<Box<dyn EthTx>> {
     let to = EthereumAddress::from_str(params["to"].as_str().unwrap())?;
     let amount = U256::from_dec_str(params["amount"].as_str().unwrap())?;
 
     let (to, amount, data) = match &params["contract"] {
         // we are dealing with an ERC20 token transfer
         Value::String(contract) => {
-            let data = encode_transfer("transfer", &to, amount);
+            let data = erc20_transfer(&to, amount);
             let to = EthereumAddress::from_str(contract)?;
             let amount = U256::from_dec_str("0")?;
             (to, amount, data)
@@ -97,10 +134,86 @@ fn parse_tx<N: EthereumNetwork>(tx: String) -> Result<Box<dyn EthTx>> {
     }
 }
 
+fn parse_tx<N: EthereumNetwork>(tx: String) -> Result<Box<dyn EthTx>> {
+    let params = serde_json::from_str::<Value>(&tx)?;
+
+    match &params["type"] {
+        Value::String(tx_type) => match tx_type.as_str() {
+            "eip3009_2nd_round" => {
+                let token = params["token"].as_str().unwrap().to_string();
+                let token_version = params["tokenVersion"].as_str().unwrap().to_string();
+                let token_contract = params["tokenContract"].as_str().unwrap().to_string();
+                let from = params["from"].as_str().unwrap().to_string();
+                let to = params["to"].as_str().unwrap().to_string();
+                let amount = params["amount"].as_str().unwrap().to_string();
+                let valid_after = params["validAfter"].as_str().unwrap().to_string();
+                let valid_before = params["validBefore"].as_str().unwrap().to_string();
+                let nonce3009 = params["nonce3009"].as_str().unwrap().to_string();
+
+                let recid = params["recid"].as_u64().unwrap() as u8;
+                let r = params["r"].as_str().unwrap();
+                let s = params["s"].as_str().unwrap();
+
+                let r = hex::decode(r)?;
+                let s = hex::decode(s)?;
+
+                let nonce = match &params["nonce"] {
+                    Value::Number(nonce) => U256::from(nonce.as_u64().unwrap()),
+                    Value::String(nonce) => U256::from_dec_str(nonce)?,
+                    _ => return Err(anyhow!("Invalid nonce value")),
+                };
+                let gas_limit = U256::from_dec_str(params["gasLimit"].as_str().unwrap())?;
+                let max_fee_per_gas = U256::from_dec_str(params["maxFeePerGas"].as_str().unwrap())?;
+                let max_priority_fee_per_gas =
+                    U256::from_dec_str(params["maxPriorityFeePerGas"].as_str().unwrap())?;
+
+                let mut params = TransferWithAuthorizationParameters::<N>::new(
+                    token,
+                    token_version,
+                    token_contract.clone(),
+                    from,
+                    to,
+                    amount,
+                    valid_after,
+                    valid_before,
+                    nonce3009,
+                )?;
+
+                let data = params.sign(recid, r, s)?;
+
+                let to = EthereumAddress::from_str(&token_contract)?;
+                let amount = U256::zero();
+
+                Ok(Box::new(Eip1559Transaction::<N>::new(
+                    &Eip1559TransactionParameters {
+                        chain_id: N::CHAIN_ID,
+                        nonce,
+                        max_priority_fee_per_gas,
+                        max_fee_per_gas,
+                        gas_limit,
+                        to,
+                        amount,
+                        data,
+                        access_list: vec![],
+                    },
+                )?))
+            }
+            _ => Err(anyhow!("invalid transaction type")),
+        },
+        Value::Null => parse_tx_old::<N>(&params),
+        _ => Err(anyhow!("invalid transaction type")),
+    }
+}
+
 pub fn generate_signing_messages<N: EthereumNetwork>(tx: String) -> Result<Value> {
-    let tx = parse_tx::<N>(tx)?;
-    let txid = tx.to_transaction_id()?.txid;
-    Ok(json!([hex::encode(txid)]))
+    match is_1st_round_params(&tx)? {
+        true => first_round_messages::<N>(tx),
+        false => {
+            let tx = parse_tx::<N>(tx)?;
+            let txid = tx.to_transaction_id()?.txid;
+            Ok(json!([hex::encode(txid)]))
+        }
+    }
 }
 
 pub fn insert_signatures<N: EthereumNetwork>(signature: String, tx: String) -> Result<Value> {
@@ -216,12 +329,6 @@ pub fn decode_raw_transaction<N: EthereumNetwork>(tx: String) -> Result<Value> {
         "txid": hex::encode(txid),
     });
 
-    fn insert(val: &mut Value, key: &str, value: &str) {
-        val.as_object_mut()
-            .unwrap()
-            .insert(key.to_string(), json!(value));
-    }
-
     match (data.is_empty(), gas_price) {
         // we are dealing with a Legacy ETH transfer
         (true, Some(gas_price)) => {
@@ -232,13 +339,13 @@ pub fn decode_raw_transaction<N: EthereumNetwork>(tx: String) -> Result<Value> {
         }
         // we are dealing with a Legacy ERC20 token transfer
         (false, Some(gas_price)) => {
-            let call = decode_transfer(data)?;
+            let call = decode(data)?;
             let contract = to.to_string();
             let to = call["params"]["to"].as_str().unwrap().to_string();
             let amount = call["params"]["amount"].as_str().unwrap().to_string();
             insert(&mut ret, "type", "Legacy ERC20 Transfer");
             insert(&mut ret, "contract", &contract);
-            insert(&mut ret, "to", &to);
+            insert(&mut ret, "to", &format!("0x{}", to));
             insert(&mut ret, "amount", &amount);
             insert(&mut ret, "gasPrice", &gas_price.to_string());
         }
@@ -260,13 +367,13 @@ pub fn decode_raw_transaction<N: EthereumNetwork>(tx: String) -> Result<Value> {
         }
         // we are dealing with an EIP-1559 ERC20 token transfer
         (false, None) => {
-            let call = decode_transfer(data)?;
+            let call = decode(data)?;
             let contract = to.to_string();
             let to = call["params"]["to"].as_str().unwrap().to_string();
             let amount = call["params"]["amount"].as_str().unwrap().to_string();
             insert(&mut ret, "type", "EIP-1559 ERC20 Transfer");
             insert(&mut ret, "contract", &contract);
-            insert(&mut ret, "to", &to);
+            insert(&mut ret, "to", &format!("0x{}", to));
             insert(&mut ret, "amount", &amount);
             insert(
                 &mut ret,
@@ -348,8 +455,6 @@ mod tests {
         let sk = "08d586ed207046d6476f92fd4852be3830a9d651fc148d6fa5a6f15b77ba5df0";
         let sk = hex::decode(sk).unwrap();
         let sk = libsecp256k1::SecretKey::parse_slice(&sk).unwrap();
-        let pk = libsecp256k1::PublicKey::from_secret_key(&sk);
-        dbg!(pk.serialize().to_vec());
 
         let (sig, recid) = libsecp256k1::sign(&msg, &sk);
         let sig = sig.serialize().to_vec();
@@ -362,9 +467,66 @@ mod tests {
             "recid": recid,
         }])
         .to_string();
+
         let tx = insert_signatures(sigs, 6002, tx, "".to_string()).unwrap();
 
         let tx = decode_raw_transaction(tx.as_str().unwrap().to_string(), 6002).unwrap();
+
+        println!("{}", tx);
+    }
+
+    #[test]
+    fn test_eip3009_transfer() {
+        let tx = r#"{
+            "type": "eip3009_2nd_round",
+        
+            "token": "USDC",
+            "tokenVersion": "2",
+            "tokenContract": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+            
+            "from": "0xd62eFebf27BC254a441692BCcB7Ce1097E2e4D3a",
+            "to": "0x69Fe38874455047c1FD71a2FCd336E14cB5Cf186",
+            "amount": "1000000",
+            "validAfter": "1754464386",
+            "validBefore": "1754472244",
+            "nonce3009": "0xc16e8459b9c3ecfbbc20c34444c72ce016cdb109fa5a982b0dd223e15e8f96de",
+            
+            "recid": 1,
+            "r": "0732ccdf0c8a5b29bd9fd80cb9f4ef49bb01163b04189ab5ab8e78f2a718bb4e",
+            "s": "7c7e1b9666528dba4a583e45df730101ebdc824012cbda942771c19089be5f05",
+            
+            "nonce": 18,
+            "gasLimit": "21000",
+            "maxPriorityFeePerGas": "1000000000",
+            "maxFeePerGas": "1000000000"
+        }"#
+        .to_string();
+
+        let msg = generate_signing_messages(6002, tx.clone(), "".to_string()).unwrap();
+        let msg = msg.as_array().unwrap();
+        let msg = msg[0].as_str().unwrap();
+        let msg = hex::decode(msg).unwrap();
+        let msg = libsecp256k1::Message::parse_slice(&msg).unwrap();
+
+        let sk = "08d586ed207046d6476f92fd4852be3830a9d651fc148d6fa5a6f15b77ba5df0";
+        let sk = hex::decode(sk).unwrap();
+        let sk = libsecp256k1::SecretKey::parse_slice(&sk).unwrap();
+
+        let (sig, recid) = libsecp256k1::sign(&msg, &sk);
+        let sig = sig.serialize().to_vec();
+        let r = &sig[..32];
+        let s = &sig[32..];
+        let recid = recid.serialize();
+        let sigs = json!([{
+            "r": hex::encode(r),
+            "s": hex::encode(s),
+            "recid": recid,
+        }])
+        .to_string();
+
+        let tx = insert_signatures(sigs, 6002, tx, "".to_string()).unwrap();
+
+        // let tx = decode_raw_transaction(tx.as_str().unwrap().to_string(), 6002).unwrap();
 
         println!("{}", tx);
     }

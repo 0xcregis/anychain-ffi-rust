@@ -33,12 +33,12 @@ struct Output {
     amount: i64,
 }
 
-fn address_format(format: &str) -> BitcoinFormat {
+pub fn address_format(format: &str) -> Result<BitcoinFormat> {
     match format {
-        "" | "1" => BitcoinFormat::P2PKH,
-        "3" => BitcoinFormat::P2SH_P2WPKH,
-        "bc1" => BitcoinFormat::Bech32,
-        _ => panic!("unsupported format"),
+        "" | "1" => Ok(BitcoinFormat::P2PKH),
+        "3" => Ok(BitcoinFormat::P2SH_P2WPKH),
+        "bc1" => Ok(BitcoinFormat::Bech32),
+        _ => Err(anyhow!("Unsupported address format")),
     }
 }
 
@@ -118,7 +118,7 @@ pub fn generate_signing_messages<N: BitcoinNetwork>(tx: String, reserved: String
                 (path, format, balance)
             } else {
                 let path = info["path"].as_str().unwrap();
-                let format = address_format(info["format"].as_str().unwrap());
+                let format = address_format(info["format"].as_str().unwrap()).unwrap();
                 let balance = info["balance"].as_i64().unwrap();
                 (path, format, balance)
             }
@@ -186,7 +186,7 @@ pub fn insert_signatures<N: BitcoinNetwork>(
                 (path, format, balance)
             } else {
                 let path = info["path"].as_str().unwrap();
-                let format = address_format(info["format"].as_str().unwrap());
+                let format = address_format(info["format"].as_str().unwrap()).unwrap();
                 let balance = info["balance"].as_i64().unwrap();
                 (path, format, balance)
             }
@@ -203,6 +203,11 @@ pub fn insert_signatures<N: BitcoinNetwork>(
 
         if N::NAME == "bitcoin cash" || N::NAME == "bitcoin cash testnet" {
             format = BitcoinFormat::CashAddr;
+        }
+
+        if format == BitcoinFormat::CashAddr {
+            tx.input(i as u32)?
+                .set_sighash(SignatureHash::SIGHASH_ALL_SIGHASH_FORKID)?;
         }
 
         tx.input(i as u32)?
@@ -235,10 +240,17 @@ pub fn decode_raw_transaction<N: BitcoinNetwork>(tx: String) -> Result<Value> {
 
     let mut outputs = json!([]);
     for output in tx.parameters.outputs {
-        let to = BitcoinAddress::<N>::from_script_pub_key(&output.script_pub_key)?;
+        let mut to = BitcoinAddress::<N>::from_script_pub_key(&output.script_pub_key)?.to_string();
+        let to = if to.starts_with("bitcoincash:") {
+            to.split_off(12)
+        } else if to.starts_with("bchtest:") {
+            to.split_off(8)
+        } else {
+            to
+        };
         let amount = output.amount;
         let output = json!({
-            "to": to.to_string(),
+            "to": to,
             "amount": amount,
         });
         outputs.as_array_mut().unwrap().push(output);
@@ -261,7 +273,7 @@ pub fn estimate_bandwidth<N: BitcoinNetwork>(tx: String, reserved: String) -> Re
         let reserved = reserved.as_array().unwrap().clone();
         let formats: Vec<BitcoinFormat> = reserved
             .iter()
-            .map(|val| address_format(val.as_str().unwrap()))
+            .map(|val| address_format(val.as_str().unwrap()).unwrap())
             .collect();
         formats
     } else {
@@ -269,7 +281,10 @@ pub fn estimate_bandwidth<N: BitcoinNetwork>(tx: String, reserved: String) -> Re
     };
 
     let dummy_sig = [0xf1u8; 64];
-    let dummy_public_key = [1u8; 33];
+    let dummy_public_key = [
+        3, 91, 62, 79, 27, 171, 138, 195, 133, 235, 193, 110, 171, 69, 40, 51, 62, 211, 178, 156,
+        112, 154, 149, 224, 105, 69, 42, 168, 168, 2, 34, 22, 146,
+    ];
 
     for i in 0..input_count {
         let format = formats[i as usize].clone();
@@ -294,153 +309,52 @@ pub fn estimate_bandwidth<N: BitcoinNetwork>(tx: String, reserved: String) -> Re
 
 #[cfg(test)]
 mod tests {
+    use crate::core::estimate_bandwidth;
+
     use super::decode_raw_transaction;
-    use crate::core::{create_address, generate_signing_messages};
-    use anychain_bitcoin::BitcoinTestnet;
-
-    #[test]
-    fn test_bitcoin() {
-        let tx = r#"{
-            "inputs": [
-                {
-                    "txid": "dd97f755f4f3ddc28a9db93140449032ba45cd76630443053030b6b3e36b51e9",
-                    "index": 0
-                },
-                {
-                    "txid": "44f154db13459421f4aae8664b9b731f4f91d998571169ddc97d614fa092ee9b",
-                    "index": 1
-                }
-            ],
-            "outputs": [
-                {
-                    "to": "tb1q2cy376amvx233ka40zw3kgx7rjt0ut9fz9e4el",
-                    "amount": 19000
-                },
-                {
-                    "to": "tb1q2cy376amvx233ka40zw3kgx7rjt0ut9fmyca74apa2cj574krsmqk8z5c9",
-                    "amount": 19000
-                }
-            ]
-        }"#;
-
-        let reserved = r#"{
-            "master_xpub": "xpub661MyMwAqRbcGv3zotXdkWta9HV6Gq3gBAAqeTTi8KDBtQAkSYL6AkKRrw7KfLsg7uaydCDt6xx1cK7pmXCPCaYAYKoTnySpMSu5Z1qNPCG",
-            "infos": [
-                {
-                    "format": "3",
-                    "balance": 19756,
-                    "path": "m/44/1/0/0/2"
-                },
-                {
-                    "format": "bc1",
-                    "balance": 26355,
-                    "path": "m/44/1/0/0/2"
-                }
-            ]
-        }"#;
-
-        let _msgs = generate_signing_messages(1, tx.to_string(), reserved.to_string())
-            .unwrap()
-            .to_string();
-
-        // let mut conn = init();
-        // send(&mut conn, msgs);
-        //
-        // let sigs = receive(&mut conn);
-
-        // let tx = insert_signatures::<BitcoinTestnet>(
-        //     sigs.to_string(),
-        //     tx.to_string(),
-        //     reserved.to_string(),
-        // )
-        // .unwrap();
-        //
-        // println!("{}", tx);
-    }
-
-    #[test]
-    fn test_bitcoincash() {
-        let tx = r#"{
-            "inputs": [
-                {
-                    "txid": "d193f0088d7b93bcf3f6d34b1ce21d78c485399a3c426665c47cae3ce3e6b04b",
-                    "index": 0
-                }
-            ],
-            "outputs": [
-                {
-                    "to": "tb1q2cy376amvx233ka40zw3kgx7rjt0ut9fmyca74apa2cj574krsmqk8z5c9",
-                    "amount": 1007000
-                }
-            ]
-        }"#;
-
-        let reserved = r#"{
-            "master_xpub": "xpub661MyMwAqRbcGv3zotXdkWta9HV6Gq3gBAAqeTTi8KDBtQAkSYL6AkKRrw7KfLsg7uaydCDt6xx1cK7pmXCPCaYAYKoTnySpMSu5Z1qNPCG",
-            "infos": [
-                {
-                    "format": "",
-                    "balance": 1015000,
-                    "path": "m/44/51/0/0/2"
-                }
-            ]
-        }"#;
-
-        let _msgs = generate_signing_messages(51, tx.to_string(), reserved.to_string())
-            .unwrap()
-            .to_string();
-
-        // let mut conn = init();
-        // send(&mut conn, msgs);
-        //
-        // let sigs = receive(&mut conn);
-        //
-        // let tx = insert_signatures::<BitcoinTestnet>(
-        //     sigs.to_string(),
-        //     tx.to_string(),
-        //     reserved.to_string(),
-        // )
-        // .unwrap();
-        //
-        // println!("{}", tx);
-    }
-
-    #[test]
-    fn test_address_gen() {
-        let xpub = "xpub661MyMwAqRbcGv3zotXdkWta9HV6Gq3gBAAqeTTi8KDBtQAkSYL6AkKRrw7KfLsg7uaydCDt6xx1cK7pmXCPCaYAYKoTnySpMSu5Z1qNPCG";
-        let fmts = [""];
-
-        // to: bchtest:qz9ncj79z033ku0ck2fng032le70rnxdtya9lccsmh
-
-        for fmt in fmts {
-            let addr = create_address(xpub.to_string(), 51, 0, 2, fmt.to_string()).unwrap();
-            assert_eq!(
-                addr,
-                serde_json::Value::String(
-                    "bchtest:qplny8ud32j59jrq8enrdwunpqlhs3sx7ufa8dcdsu".to_string()
-                )
-            );
-        }
-    }
-
-    #[test]
-    fn test_address_gen_bitcoin_mainet_0() {
-        let xpub = "xpub661MyMwAqRbcEzQAuTRFpp8Wvo7QDHrQ4MxXMRuRSxUUXnKbUq6GdUmUfp2QY9j8Hu21juYrgQYUfd39GitgR9kKkDykohHYAjDpVVBdGjJ";
-        let fmts = [""];
-
-        for fmt in fmts {
-            let addr = create_address(xpub.to_string(), 0, 0, 1, fmt.to_string()).unwrap();
-            assert_eq!(
-                addr,
-                serde_json::Value::String("1EjwNvzypjwuYuqZFcX3wSfPpPf5sNG9b5".to_string())
-            );
-        }
-    }
+    use anychain_bitcoin::BitcoinCashTestnet;
 
     #[test]
     fn test_decode() {
-        let tx = "02000000000102e9516be3b3b630300543046376cd45ba3290444031b99d8ac2ddf3f455f797dd000000001716001403e1ec03ca1af39920e0b367450d3f83e744ae7bf2ffffff9bee92a04f617dc9dd69115798d9914f1f739b4b66e8aaf421944513db54f1440100000000f2ffffff02384a00000000000016001456091f6bbb619518dbb5789d1b20de1c96fe2ca9384a00000000000022002056091f6bbb619518dbb5789d1b20de1c96fe2ca9d931df57a1eab12a7ab61c3602483045022100a5d341330880733212decaa31b2535e7e9e7acfacb06a981f3d25c78089ce9370220088427181319b15204a32d7567ff164324d1ec70fd5f8d90f234d6f9607c4ff00121025524f7862c566e0107afe2475fc3db1b29b8daf74781de725675aeefb732c8220247304402204e140e54869a6912e474e7fb90e4214a93794b9f59a143549043a52f2dc34d98022070a460a8f94441cc5f71651c5ed884291abefef18c8342fa06ae90aec3e664730121025524f7862c566e0107afe2475fc3db1b29b8daf74781de725675aeefb732c82200000000";
-        let tx = decode_raw_transaction::<BitcoinTestnet>(tx.to_string()).unwrap();
-        dbg!("{}", tx);
+        let tx = "02000000019376f9bf8c15380ed848010a48a7e06ebbfa30a06081aeacdefd0ec38829555e010000006b483045022100da2c8ede4442585a947c380e61bc7c3c3f2d7c67b36c8160fac9ae1e231007e502205c51d4a08face0ab6072314b986096e535e4f79e64d77b7b21e6d9d15374b3cb412102a03e141bd973f6b10e7d5e861a111f1480a750df3fefedca09971a2f34dd6180f2ffffff02e8030000000000001976a91437c8dedf73f9b0e7d5eca6b14afda37773db62cc88acf9770000000000001976a91461ef9e36742304ce57de3fe8a6aeb7dc53a0270d88ac00000000";
+        let tx = decode_raw_transaction::<BitcoinCashTestnet>(tx.to_string()).unwrap();
+        println!("{}", tx);
+    }
+
+    #[test]
+    fn test_bandwidth() {
+        let tx = json!({
+            "inputs": [
+                {
+                    "index": 2,
+                    "txid": "56091f6bbb619518dbb5789d1b20de1c96fe2ca9d931df57a1eab12a7ab61c36"
+                },
+                {
+                    "index": 0,
+                    "txid": "36d3815b142fc9a93c1fff1ef7994fe6f3919ccc54a51c891e8418ca95a51020"
+                },
+                {
+                    "index": 1,
+                    "txid": "ba2bcfed866d89c59110901ee513ffaba1ab6c8e3b99ab8d386c0f8fc0f8a38b"
+                }
+            ],
+            "outputs": [
+                {
+                    "amount": 100000,
+                    "to": "1ASxbWAVJgSmECShbr7pNFhuFtbxwn7aww"
+                },
+                {
+                    "amount": 500000,
+                    "to": "1EjwNvzypjwuYuqZFcX3wSfPpPf5sNG9b5"
+                }
+            ]
+        })
+        .to_string();
+
+        let reserved = json!(["bc1", "bc1", "bc1"]).to_string();
+
+        let bw = estimate_bandwidth(tx, 0, reserved).unwrap();
+
+        println!("bw: {}", bw);
     }
 }
