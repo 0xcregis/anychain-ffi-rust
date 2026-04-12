@@ -556,8 +556,13 @@ pub fn decrypt(data: &str, secret_key: &str) -> Result<Value> {
 }
 
 pub fn json_digest(json: &str) -> Result<Value> {
+    // Normalize JSON before hashing so equivalent payloads share the same digest.
+    // e.g:
+    // {"a":1,"b":2}
+    // {"b":2,"a":1}
     let val = serde_json::from_str::<Value>(json)?;
     let stream = serialize_json(&val);
+
     let hash = ripemd(stream.as_bytes());
     Ok(Value::String(hash))
 }
@@ -568,19 +573,27 @@ fn serialize_json(val: &Value) -> String {
         Value::Bool(b) => format!("{}", b),
         Value::Number(n) => format!("{}", n),
         Value::String(s) => s.clone(),
+        // Value::Null => "null".to_string(),
+        // Value::Bool(b) => b.to_string(),
+        // Value::Number(n) => n.to_string(),
+        // Value::String(s) => Value::String(s.clone()).to_string(),
         Value::Array(arr) => {
-            let mut ret = String::new();
-            for elem in arr {
-                ret = format!("{}{}", ret, serialize_json(elem));
-            }
-            ret
+            let parts: Vec<String> = arr.iter().map(serialize_json).collect();
+            format!("[{}]", parts.join(","))
         }
         Value::Object(map) => {
-            let mut ret = String::new();
-            for (key, value) in map {
-                ret = format!("{}{}{}", ret, key, serialize_json(value));
-            }
-            ret
+            let mut entries: Vec<(String, String)> = map
+                .iter()
+                .map(|(key, value)| (key.clone(), serialize_json(value)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let parts: Vec<String> = entries
+                .into_iter()
+                .map(|(key, value)| format!("{}:{}", Value::String(key), value))
+                .collect();
+
+            format!("{{{}}}", parts.join(","))
         }
     }
 }
@@ -727,12 +740,48 @@ fn key_and_iv(secret_key: &str) -> Result<([u8; 16], [u8; 16])> {
 //     println!("addr: {}", addr);
 // }
 
-#[test]
-fn test_create_addr_eth() {
-    let xpub = "xpub661MyMwAqRbcFRmatjv3Ff2dY5rQHNpuEYZ2CbjQ8Qn13taUMRJ82CyYrHApzgE2HRFV3iWMQkNYqAQmPazy2cdNn16phg3BexnjRFqJ8CP";
-    let addr = create_address(xpub.to_string(), 60, 0, 1, "".to_string()).unwrap();
-    assert_eq!(
-        "0x2ec9f63b7b0f2cdb718905dadd925fc637f4f0f2",
-        addr.as_str().unwrap()
-    );
+#[cfg(test)]
+mod tests {
+    use super::serialize_json;
+    use crate::core::{create_address, json_digest};
+
+    #[test]
+    fn test_create_addr_eth() {
+        let xpub = "xpub661MyMwAqRbcFRmatjv3Ff2dY5rQHNpuEYZ2CbjQ8Qn13taUMRJ82CyYrHApzgE2HRFV3iWMQkNYqAQmPazy2cdNn16phg3BexnjRFqJ8CP";
+        let addr = create_address(xpub.to_string(), 60, 0, 1, "".to_string()).unwrap();
+        assert_eq!(
+            "0x2ec9f63b7b0f2cdb718905dadd925fc637f4f0f2",
+            addr.as_str().unwrap()
+        );
+    }
+    #[test]
+    fn test_json_digest_without_valid_credentials() {
+        // These structures look similar, but they are not the same JSON value.
+        let benign = json!({
+            "amount": ["10", "000"]
+        });
+        let malicious = json!({
+            "amount": ["10000"]
+        });
+
+        let s1 = json_digest(&benign.to_string()).unwrap();
+        let s2 = json_digest(&malicious.to_string()).unwrap();
+
+        assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn test_json_digest_serialize_json() {
+        let array = json!(["10", "000"]);
+        assert_eq!(serialize_json(&array), r#"[10,000]"#);
+
+        let object = json!({
+            "b": 1,
+            "a": {
+                "d": [3, 2],
+                "c": 4
+            }
+        });
+        assert_eq!(serialize_json(&object), r#"{"a":{"c":4,"d":[3,2]},"b":1}"#);
+    }
 }
